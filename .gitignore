@@ -1,0 +1,14 @@
+# secrets
+.env
+
+# PDF source material (add yourself)
+*.pdf
+
+# evaluation output
+eval_results_*.json
+
+# Go build output
+/rag
+
+# macOS
+.DS_Store

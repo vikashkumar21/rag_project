@@ -1,0 +1,14 @@
+# Evaluation questions for the baseline RAG pipeline.
+# One question per line. Lines starting with # are comments.
+# These mirror the eval_questions.txt used in the TruLens evaluation.
+
+How do you build a portfolio of AI projects?
+What skills are most important for an AI engineer?
+How do I transition into an AI career from a software engineering background?
+What is the difference between machine learning and deep learning?
+How important is mathematics for working in AI?
+What resources does the author recommend for learning AI?
+How can I find a mentor in the AI field?
+What are the most common mistakes people make when starting in AI?
+How long does it typically take to become job-ready in AI?
+What types of projects should I include in my AI portfolio?
