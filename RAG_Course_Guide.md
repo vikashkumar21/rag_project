@@ -9,162 +9,137 @@
 
 ```mermaid
 flowchart TD
-    Doc["Source Document / PDF"] --> A["1️⃣ Baseline RAG\nFixed Chunk Top-K"]
-    Doc --> B["2️⃣ Sentence-Window Retrieval\nSentence Embedding + Context Window"]
-    Doc --> C["3️⃣ Auto-Merging Retrieval\nHierarchical Chunks + Leaf-to-Parent Rollup"]
-    A --> Eval["4️⃣ RAG Triad Evaluation\nContext Relevance • Groundedness • Answer Relevance"]
-    B --> Eval
-    C --> Eval
-    Eval --> Lead["5️⃣ Comparative Leaderboard\nTruLens-style Benchmark"]
+    Doc["Source Document / PDF"] --> L1["1️⃣ Advanced RAG Pipeline\nBaseline • Sentence-Window • Auto-Merging"]
+    L1 --> L2["2️⃣ RAG Triad of Metrics\nAnswer Relevance • Context Relevance • Groundedness"]
+    L2 --> L3["3️⃣ Sentence-Window In-Depth\nWindow Sizing & Reranking Optimization"]
+    L2 --> L4["4️⃣ Auto-Merging In-Depth\nHierarchical Tuning & Child-Parent Ratios"]
+    L2 --> L5["5️⃣ Experiment Tracking\nBenchmarking & Iteration Leaderboards"]
 ```
 
 ---
 
 ## Lesson 1 — Advanced RAG Pipeline
 
-In Lesson 1, we implement the complete RAG spectrum introduced in the course:
-1. **Baseline RAG**: Standard chunking + top-k vector similarity search.
-2. **Sentence-Window Retrieval**: Decoupling the text used for search from the text sent to the LLM.
-3. **Auto-Merging Retrieval**: Multi-tier hierarchical indexing with dynamic child-to-parent merging.
-4. **TruLens RAG Triad**: Evaluation framework using LLM-as-judge.
+In Lesson 1, we implemented the complete RAG architectural patterns:
+1. **Baseline RAG**: Standard chunking + top-k vector similarity search (`Direct Query Engine`).
+2. **Sentence-Window Retrieval**: Decoupling search granularity from context generation (`Sentence Window Query Engine`).
+3. **Auto-Merging Retrieval**: Multi-tier hierarchical indexing with dynamic child-to-parent consolidation (`Automerging Query Engine`).
 
 ---
 
-### 1. Baseline RAG (`Direct Query Engine`)
+## Lesson 2 — RAG Triad of Metrics & Chain-of-Thought Evaluation
 
-```
-Document ──► Fixed Chunks (1024) ──► Embeddings ──► Vector Store
-                                                           │
-Query ──► Embed ──► Cosine Similarity (Top 6) ─────────────┘
-                         │
-                         ▼
-             LLM Prompt (Context + Question) ──► Answer
-```
+In Lesson 2, the course transitions from *building* to *evaluating and debugging* RAG systems.
 
-- **Problem with Baseline**:
-  - If chunks are too small: retrieval is precise, but the LLM lacks sufficient surrounding context to answer thoroughly.
-  - If chunks are too large: retrieval quality degrades due to semantic noise (topic drift inside a big chunk).
+Without rigorous evaluation, you cannot know if your RAG pipeline failed because:
+- The retriever retrieved irrelevant junk.
+- The LLM hallucinated despite good context.
+- The LLM gave a truthful answer to the wrong question.
 
----
-
-### 2. Sentence-Window Retrieval (`Sentence Window Query Engine`)
-
-```mermaid
-sequenceDiagram
-    participant Docs as Document
-    participant P as SentenceWindowNodeParser
-    participant VS as VectorStore (Sentence Embeddings)
-    participant Post as MetadataReplacementPostProcessor
-    participant Rerank as LLM Reranker
-    participant LLM as Generator LLM
-
-    Docs->>P: Split text into individual sentences
-    P->>VS: Embed only sentence[i], store window[i-3...i+3] in metadata
-    Note over VS: Search query against focused sentences
-    VS->>Post: Retrieve Top 6 matching sentences
-    Post->>Post: Replace sentence text with its window metadata
-    Post->>Rerank: Candidate windows
-    Rerank->>LLM: Top 2 highest-scoring windows
-    LLM-->>Docs: Grounded Answer
-```
-
-- **Core Insight**: **Decouple the embedding representation from the generation context.**
-- Embed single sentences for razor-sharp semantic matching.
-- Expand each hit with its surrounding window of $N$ sentences (default: 3 before and 3 after) before passing to the LLM.
-- Filter with a cross-encoder / LLM reranker to select the top 2 richest windows.
-
----
-
-### 3. Auto-Merging Retrieval (`Automerging Query Engine`)
+The **RAG Triad** isolates each step of the RAG loop into an independent feedback metric:
 
 ```mermaid
 graph TD
-    P1["Parent Chunk (2048 runes)"]
-    C1["Child 1 (512 runes)"]
-    C2["Child 2 (512 runes)"]
-    L1["Leaf 1 (128 runes)"]
-    L2["Leaf 2 (128 runes)"]
-    L3["Leaf 3 (128 runes)"]
-    L4["Leaf 4 (128 runes)"]
+    Q["User Query (Input Q)"]
+    S["Retrieved Context (Source S)"]
+    A["Generated Answer (Output A)"]
 
-    P1 --> C1
-    P1 --> C2
-    C1 --> L1
-    C1 --> L2
-    C2 --> L3
-    C2 --> L4
+    Q -- "1. Context Relevance" --> S
+    S -- "2. Groundedness" --> A
+    Q -- "3. Answer Relevance" --> A
 
-    classDef indexed fill:#4f46e5,stroke:#333,stroke-width:2px,color:#fff;
-    classDef docstore fill:#059669,stroke:#333,stroke-width:2px,color:#fff;
-    class L1,L2,L3,L4 indexed;
-    class P1,C1,C2 docstore;
+    classDef nodeStyle fill:#1e293b,stroke:#64748b,stroke-width:2px,color:#fff;
+    class Q,S,A nodeStyle;
 ```
 
-- **Storage Setup**:
-  - `DocStore`: Holds all nodes at every level (2048, 512, 128 runes).
-  - `VectorStore`: Only stores and indexes the **smallest leaf nodes** (128 runes).
-- **Retrieval & Auto-Merging Algorithm**:
-  1. Retrieve top-12 leaf chunks by cosine similarity.
-  2. For every parent, count how many of its children were retrieved.
-  3. If $\ge 50\%$ (threshold) of a parent's children are retrieved, **evict the children and replace them with the parent node**!
-  4. Continue merging recursively up the tree if grandparent conditions are met.
-  5. Rerank the final consolidated chunks to top-2 and feed to the generator LLM.
+---
+
+### The Three Feedback Functions In-Depth
+
+#### 1. Answer Relevance ($Q \longrightarrow A$)
+- **Question**: Does the answer directly address the user's question?
+- **Python**:
+  ```python
+  f_qa_relevance = Feedback(provider.relevance_with_cot_reasons, name="Answer Relevance").on_input_output()
+  ```
+- **Go**: [`evaluator.ScoreAnswerRelevance(ctx, question, answer)`](file:///Users/vikash/projects/rag_project/internal/eval/eval.go)
+- **Why it matters**: A response can be 100% grounded in the context, but if the user asked *"What is the salary of an ML engineer?"* and the bot replied *"An ML engineer trains neural networks in Python,"* the answer relevance is zero.
+- **Chain of Thought (CoT)**: Returns a score $\in [0.0, 1.0]$ and an explicit rationale explaining whether any part of the question was skipped or answered evasively.
 
 ---
 
-### 4. The RAG Triad Evaluation (TruLens Equivalent)
-
-| Metric | Question it Answers | TruLens Implementation | Our Go Implementation |
-|---|---|---|---|
-| **Context Relevance** | Is the retrieved passage relevant to the question? | `Feedback(openai.relevance_with_cot_reasons).on_input().on(nodes)` | `evaluator.scoreContextRelevance()` |
-| **Groundedness** | Are the facts in the answer supported by the retrieved context? | `Groundedness(groundedness_provider=openai).on(nodes).on_output()` | `evaluator.scoreGroundedness()` |
-| **Answer Relevance** | Does the answer directly address the user's inquiry? | `Feedback(openai.relevance_with_cot_reasons).on_input_output()` | `evaluator.scoreAnswerRelevance()` |
+#### 2. Context Relevance ($Q \longrightarrow S$)
+- **Question**: Is the retrieved context actually relevant and free of irrelevant noise?
+- **Python**:
+  ```python
+  f_qs_relevance = (
+      Feedback(provider.qs_relevance_with_cot_reasons, name="Context Relevance")
+      .on_input()
+      .on(TruLlama.select_source_nodes().node.text)
+      .aggregate(np.mean)
+  )
+  ```
+- **Go**: [`evaluator.ScoreContextRelevance(ctx, question, retrievedContext)`](file:///Users/vikash/projects/rag_project/internal/eval/eval.go)
+- **Why it matters**: If retrieval returns irrelevant documents, the context window fills with distraction ("lost in the middle" problem), causing slower generation, higher API cost, and hallucination.
+- **Aggregation**: Scores each retrieved chunk and computes the mean relevance score across all retrieved source nodes ($\frac{1}{N} \sum_{i=1}^N \text{rel}(Q, S_i)$).
 
 ---
 
-## Python vs Go Mapping
+#### 3. Groundedness ($S \longrightarrow A$)
+- **Question**: Is every factual claim in the answer supported by the retrieved context?
+- **Python**:
+  ```python
+  grounded = Groundedness(groundedness_provider=provider)
+  f_groundedness = (
+      Feedback(grounded.groundedness_measure_with_cot_reasons, name="Groundedness")
+      .on(context_selection)
+      .on_output()
+      .aggregate(grounded.grounded_statements_aggregator)
+  )
+  ```
+- **Go**: [`evaluator.ScoreGroundedness(ctx, retrievedContext, answer)`](file:///Users/vikash/projects/rag_project/internal/eval/eval.go)
+- **Algorithm (Statement-by-Statement Verification)**:
+  1. Break the answer down into atomic factual statements: $A \rightarrow \{s_1, s_2, \dots, s_m\}$.
+  2. For each statement $s_j$, verify if it can be directly inferred from the retrieved context $S$.
+  3. Aggregate the score as the ratio of supported statements:
+     $$\text{Groundedness} = \frac{\text{Count}(\text{Supported})}{\text{Total Statements}}$$
+  4. Output Chain-of-Thought reasons documenting which statements passed and which failed verification.
 
-| Python Concept / Class | Go Package & Type | Notes |
+---
+
+### Python vs Go Evaluation Mapping
+
+| TruLens (Python) | Go Implementation | Rationale |
 |---|---|---|
-| `SimpleDirectoryReader` | `loader.LoadPDF()` | Reads PDF pages, preserves page metadata |
-| `Document` | `loader.Document` | `ID`, `Text`, `Metadata` |
-| `SentenceWindowNodeParser` | `loader.BuildSentenceWindows()` | Extracts sentences and builds surrounding window |
-| `HierarchicalNodeParser` | `loader.BuildHierarchy()` | Multi-level tree with `ParentID` and `ChildIDs` |
-| `VectorStoreIndex` | `vectorstore.InMemoryStore` | Thread-safe in-memory cosine store |
-| `StorageContext.docstore` | `vectorstore.InMemoryDocStore` | Key-value store for tree nodes |
-| `SentenceTransformerRerank` | `retriever.NewLLMReranker()` | Cross-attention scoring using LLM |
-| `AutoMergingRetriever` | `retriever.NewAutoMerging()` | Threshold-based child eviction and parent replacement |
-| `Tru` & `TruLlama` | `eval.Evaluator` & `eval.PrintLeaderboard` | LLM-as-judge scoring + formatted comparison table |
+| `provider = fOpenAI()` | `internal/eval/eval.go` (`judgeJSON`) | Uses LLM-as-judge with JSON schema enforcement |
+| `Feedback(...).on_input_output()` | `evaluator.ScoreAnswerRelevance()` | Direct functional evaluation |
+| `Feedback(...).aggregate(np.mean)` | `evaluator.ScoreContextRelevance()` | Averages node scores |
+| `grounded.grounded_statements_aggregator` | `evaluator.ScoreGroundedness()` | Extracts atomic claims and computes supported ratio |
+| `records, feedback = tru.get_records_and_feedback()` | `evaluator.Records()` | Structured slice of `Record` structs |
+| `records[["input", "output"] + feedback]` | `eval.PrintRecordsDetail()` | Formatted CLI printout showing inputs, outputs & CoT |
+| `tru.get_leaderboard(app_ids=[])` | `eval.PrintLeaderboard()` | Multi-pipeline comparative table |
+| `tru.run_dashboard()` (`:8501`) | `eval.StartDashboard("127.0.0.1:8501")` | Embedded zero-dependency HTTP server on port 8501 |
 
 ---
 
 ## Running the Code
 
-### 1. Set your OpenAI API Key
+### 1. Run Lesson 2 Mode (App_1 with Sentence-Window & CoT Evaluation)
 ```bash
-cp .env.example .env
-# Edit .env with your key:
-OPENAI_API_KEY=sk-...
+go run ./cmd/rag -mode=lesson2
 ```
 
-### 2. Run All 3 Pipelines with Comparative Leaderboard
+### 2. Run Lesson 2 and Launch the Web Dashboard (`http://localhost:8501/`)
+```bash
+go run ./cmd/rag -mode=lesson2 -dashboard
+```
+
+### 3. Run All Pipelines (Comparative Leaderboard)
 ```bash
 go run ./cmd/rag -mode=all
 ```
 
-### 3. Run a Specific Pipeline
-```bash
-# Baseline only
-go run ./cmd/rag -mode=baseline
-
-# Sentence-window only
-go run ./cmd/rag -mode=sentence
-
-# Auto-merging only
-go run ./cmd/rag -mode=automerging
-```
-
-### 4. Run Unit Tests
+### 4. Run Tests
 ```bash
 go test -v ./...
 ```

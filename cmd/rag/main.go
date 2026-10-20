@@ -1,18 +1,23 @@
 // cmd/rag is the CLI entry point for the RAG project.
-// Run it with:
 //
-//	OPENAI_API_KEY=sk-... go run ./cmd/rag
+// Usage:
 //
-// Or with a .env file:
+//	# Run Lesson 2: RAG Triad of Metrics with Sentence-Window & CoT
+//	go run ./cmd/rag -mode=lesson2
 //
-//	go run ./cmd/rag
+//	# Run Lesson 2 and launch interactive dashboard on :8501
+//	go run ./cmd/rag -mode=lesson2 -dashboard
+//
+//	# Run all pipelines (Baseline, Sentence-Window, Auto-Merging)
+//	go run ./cmd/rag -mode=all
 //
 // Flags:
 //
-//	-pdf   path to the source PDF (default: eBook-How-to-Build-a-Career-in-AI.pdf)
-//	-eval  path to eval questions file (default: eval_questions.txt)
-//	-mode  pipeline to run: "baseline", "sentence", "automerging", or "all" (default: "all")
-//	-topk  number of chunks to retrieve per query (default: 6)
+//	-mode       pipeline/lesson mode: "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson2")
+//	-dashboard  launch TruLens-style interactive web dashboard at http://localhost:8501 (default: false)
+//	-pdf        path to source PDF (default: eBook-How-to-Build-a-Career-in-AI.pdf)
+//	-eval       path to eval questions file (default: eval_questions.txt)
+//	-topk       number of chunks to retrieve per query (default: 6)
 package main
 
 import (
@@ -59,13 +64,17 @@ There are multiple career pathways in artificial intelligence:
 - Data Scientist: Focuses on analyzing data, formulating business hypotheses, experimentation, and statistical modeling.
 - AI Research Scientist: Pushes the frontiers of machine learning, developing novel neural architectures and publishing papers.
 - Full-Stack AI Application Developer: Integrates foundation models via APIs, building user-facing RAG systems, agents, and intuitive workflows.
-Select the role that matches your strengths in coding, mathematics, or product thinking.`
+Select the role that matches your strengths in coding, mathematics, or product thinking.
+
+Chapter 4: Keys to Success in AI
+To be successful in AI, continuous learning and perseverance are paramount. The field evolves rapidly, so developing strong foundations in core algorithms, staying curious, and reading research papers weekly will keep you at the frontier. Cultivate good communication skills so you can explain technical machine learning trade-offs clearly to non-technical stakeholders.`
 
 func main() {
 	// ── Flags ──────────────────────────────────────────────────────────────────
 	pdfPath := flag.String("pdf", "eBook-How-to-Build-a-Career-in-AI.pdf", "path to source PDF")
 	evalFile := flag.String("eval", "eval_questions.txt", "path to evaluation questions file")
-	mode := flag.String("mode", "all", "pipeline mode: baseline, sentence, automerging, or all")
+	mode := flag.String("mode", "lesson2", "mode: lesson2, baseline, sentence, automerging, or all")
+	dashboard := flag.Bool("dashboard", false, "start interactive dashboard on http://localhost:8501")
 	topK := flag.Int("topk", 6, "number of chunks to retrieve per query")
 	flag.Parse()
 
@@ -104,27 +113,114 @@ func main() {
 	judge := llm.NewOpenAI(apiKey, "gpt-3.5-turbo", 0.1)
 	ranker := retriever.NewLLMReranker(judge)
 
-	// Load evaluation questions
+	var evaluators []*eval.Evaluator
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// LESSON 2 SPECIFIC MODE (App_1 with Sentence-Window & Full CoT RAG Triad)
+	// ══════════════════════════════════════════════════════════════════════════
+	if *mode == "lesson2" || *mode == "app1" {
+		fmt.Println("\n=======================================================")
+		fmt.Println("🎓 LESSON 2: RAG TRIAD OF METRICS (App_1)")
+		fmt.Println("=======================================================")
+
+		// Build sentence window engine
+		store := vectorstore.NewInMemory()
+		sentenceEngine, err := pipeline.BuildSentenceWindow(ctx, []loader.Document{document}, pipeline.SentenceWindowConfig{
+			Embedder:        emb,
+			Store:           store,
+			LLM:             lm,
+			Reranker:        ranker,
+			SimilarityTopK:  6,
+			RerankTopN:      2,
+			SentenceOptions: loader.DefaultSentenceWindowOptions(),
+		})
+		if err != nil {
+			log.Fatalf("build sentence engine: %v", err)
+		}
+
+		// Initial test query from Lesson 2
+		testQuery := "How do you create your AI portfolio?"
+		fmt.Printf("\n❓ Initial Query: %s\n", testQuery)
+		out, err := sentenceEngine.Query(ctx, testQuery)
+		if err != nil {
+			log.Fatalf("query: %v", err)
+		}
+		fmt.Printf("💬 Output:\n%s\n", strings.TrimSpace(out.Answer))
+
+		// TruLlama recorder for App_1
+		evaluator := eval.NewEvaluator(judge, "App_1")
+		eval.RegisterEvaluator(evaluator)
+		evaluators = append(evaluators, evaluator)
+
+		// Load evaluation questions and append Lesson 2's new question
+		evalQs := loadLines(*evalFile)
+		if len(evalQs) == 0 {
+			evalQs = []string{
+				"How do you build a portfolio of AI projects?",
+				"What skills are most important for an AI engineer?",
+				"How do I transition into an AI career from a software engineering background?",
+			}
+		}
+		evalQs = append(evalQs, "How can I be successful in AI?")
+
+		fmt.Printf("\nEvaluating %d question(s) with Feedback Functions:\n", len(evalQs))
+		fmt.Printf(" 1. Answer Relevance (with CoT reasons)\n")
+		fmt.Printf(" 2. Context Relevance (aggregated across nodes with CoT reasons)\n")
+		fmt.Printf(" 3. Groundedness (statement-level verification with CoT reasons)\n\n")
+
+		for _, q := range evalQs {
+			res, qErr := sentenceEngine.Query(ctx, q)
+			if qErr != nil {
+				log.Printf("query error on %q: %v", q, qErr)
+				continue
+			}
+			rec, eErr := evaluator.Evaluate(ctx, q, res.Context, res.Answer)
+			if eErr != nil {
+				log.Printf("eval error on %q: %v", q, eErr)
+				continue
+			}
+			fmt.Printf("   ✔ [%-40s] Ctx: %.2f | Grd: %.2f | Ans: %.2f\n",
+				truncate(q, 38), rec.ContextRelevance.Score, rec.Groundedness.Score, rec.AnswerRelevance.Score)
+		}
+
+		// Print records table matching: records[["input", "output"] + feedback]
+		eval.PrintRecordsDetail(evaluator)
+
+		// Print TruLens Leaderboard
+		eval.PrintLeaderboard(evaluator)
+
+		// Save records to JSON file
+		_ = evaluator.SaveJSON("eval_results_lesson2.json")
+		fmt.Println("\n💾 Records saved to eval_results_lesson2.json")
+
+		if *dashboard {
+			if err := eval.StartDashboard("127.0.0.1:8501"); err != nil {
+				log.Fatalf("dashboard: %v", err)
+			}
+		} else {
+			fmt.Println("\n💡 Tip: Run with -dashboard to launch the interactive TruLens UI on http://localhost:8501/")
+		}
+		return
+	}
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// MULTI-PIPELINE COMPARISON MODES (Baseline, Sentence-Window, Auto-Merging)
+	// ══════════════════════════════════════════════════════════════════════════
 	evalQs := loadLines(*evalFile)
 	if len(evalQs) == 0 {
 		evalQs = []string{
 			"What are steps to take when finding projects to build your experience?",
 			"How do I build a portfolio of AI projects?",
-			"What is the right AI job for me?",
+			"How can I be successful in AI?",
 		}
 	} else {
-		evalQs = append(evalQs, "What is the right AI job for me?")
+		evalQs = append(evalQs, "How can I be successful in AI?")
 	}
-
-	var evaluators []*eval.Evaluator
 
 	runBaseline := *mode == "baseline" || *mode == "all"
 	runSentence := *mode == "sentence" || *mode == "all"
 	runAutoMerge := *mode == "automerging" || *mode == "all"
 
-	// ══════════════════════════════════════════════════════════════════════════
-	// 1. BASELINE RAG PIPELINE (Direct Query Engine)
-	// ══════════════════════════════════════════════════════════════════════════
 	if runBaseline {
 		fmt.Println("\n=======================================================")
 		fmt.Println("🚀 1. BASELINE RAG PIPELINE (Direct Query Engine)")
@@ -141,13 +237,11 @@ func main() {
 		}
 
 		evaluator := eval.NewEvaluator(judge, "Direct Query Engine (Baseline)")
+		eval.RegisterEvaluator(evaluator)
 		runEvaluation(ctx, "Baseline", rag, evalQs, evaluator)
 		evaluators = append(evaluators, evaluator)
 	}
 
-	// ══════════════════════════════════════════════════════════════════════════
-	// 2. SENTENCE-WINDOW RAG PIPELINE (Sentence Window Query Engine)
-	// ══════════════════════════════════════════════════════════════════════════
 	if runSentence {
 		fmt.Println("\n=======================================================")
 		fmt.Println("🚀 2. ADVANCED RAG: SENTENCE-WINDOW RETRIEVAL")
@@ -167,13 +261,11 @@ func main() {
 		}
 
 		evaluator := eval.NewEvaluator(judge, "Sentence Window Query Engine")
+		eval.RegisterEvaluator(evaluator)
 		runEvaluation(ctx, "Sentence-Window", rag, evalQs, evaluator)
 		evaluators = append(evaluators, evaluator)
 	}
 
-	// ══════════════════════════════════════════════════════════════════════════
-	// 3. AUTO-MERGING RAG PIPELINE (Automerging Query Engine)
-	// ══════════════════════════════════════════════════════════════════════════
 	if runAutoMerge {
 		fmt.Println("\n=======================================================")
 		fmt.Println("🚀 3. ADVANCED RAG: AUTO-MERGING RETRIEVAL")
@@ -197,15 +289,19 @@ func main() {
 		}
 
 		evaluator := eval.NewEvaluator(judge, "Automerging Query Engine")
+		eval.RegisterEvaluator(evaluator)
 		runEvaluation(ctx, "Auto-Merging", rag, evalQs, evaluator)
 		evaluators = append(evaluators, evaluator)
 	}
 
-	// ══════════════════════════════════════════════════════════════════════════
-	// TRULENS LEADERBOARD SUMMARY
-	// ══════════════════════════════════════════════════════════════════════════
 	if len(evaluators) > 0 {
 		eval.PrintLeaderboard(evaluators...)
+	}
+
+	if *dashboard {
+		if err := eval.StartDashboard("127.0.0.1:8501"); err != nil {
+			log.Fatalf("dashboard: %v", err)
+		}
 	}
 }
 
@@ -215,9 +311,6 @@ type queryable interface {
 
 func runEvaluation(ctx context.Context, name string, rag queryable, questions []string, evaluator *eval.Evaluator) {
 	fmt.Printf("\nEvaluating %d question(s) with RAG Triad...\n", len(questions))
-	fmt.Printf("   %-50s  %-8s %-8s %-8s\n", "Question", "Ctx Rel", "Ground", "Ans Rel")
-	fmt.Println("   " + strings.Repeat("─", 82))
-
 	for i, q := range questions {
 		res, err := rag.Query(ctx, q)
 		if err != nil {
@@ -225,18 +318,16 @@ func runEvaluation(ctx context.Context, name string, rag queryable, questions []
 			continue
 		}
 
-		// First question: print snippet of sample output
-		if i == 0 {
-			fmt.Printf("\n💬 Sample Answer [%s]:\n%s\n\n", name, strings.TrimSpace(res.Answer))
-		}
-
 		rec, eErr := evaluator.Evaluate(ctx, q, res.Context, res.Answer)
 		if eErr != nil {
 			log.Printf("[%s] eval err: %v", name, eErr)
 			continue
 		}
-		fmt.Printf("   %-50s  %-8.3f %-8.3f %-8.3f\n",
-			truncate(q, 48), rec.ContextRelevance, rec.Groundedness, rec.AnswerRelevance)
+		if i == 0 {
+			fmt.Printf("   Sample Answer [%s]:\n   %s\n\n", name, truncate(strings.TrimSpace(res.Answer), 120))
+		}
+		fmt.Printf("   ✔ [%-40s] Ctx: %.2f | Grd: %.2f | Ans: %.2f\n",
+			truncate(q, 38), rec.ContextRelevance.Score, rec.Groundedness.Score, rec.AnswerRelevance.Score)
 	}
 }
 
