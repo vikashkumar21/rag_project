@@ -2,18 +2,21 @@
 //
 // Usage:
 //
+//	# Run Lesson 3: Sentence Window Retrieval (window 1 vs 3, reranker demo, index persistence)
+//	go run ./cmd/rag -mode=lesson3
+//
 //	# Run Lesson 2: RAG Triad of Metrics with Sentence-Window & CoT
 //	go run ./cmd/rag -mode=lesson2
 //
-//	# Run Lesson 2 and launch interactive dashboard on :8501
-//	go run ./cmd/rag -mode=lesson2 -dashboard
+//	# Run with interactive dashboard on :8501
+//	go run ./cmd/rag -mode=lesson3 -dashboard
 //
 //	# Run all pipelines (Baseline, Sentence-Window, Auto-Merging)
 //	go run ./cmd/rag -mode=all
 //
 // Flags:
 //
-//	-mode       pipeline/lesson mode: "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson2")
+//	-mode       pipeline/lesson mode: "lesson3", "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson3")
 //	-dashboard  launch TruLens-style interactive web dashboard at http://localhost:8501 (default: false)
 //	-pdf        path to source PDF (default: eBook-How-to-Build-a-Career-in-AI.pdf)
 //	-eval       path to eval questions file (default: eval_questions.txt)
@@ -73,7 +76,7 @@ func main() {
 	// ── Flags ──────────────────────────────────────────────────────────────────
 	pdfPath := flag.String("pdf", "eBook-How-to-Build-a-Career-in-AI.pdf", "path to source PDF")
 	evalFile := flag.String("eval", "eval_questions.txt", "path to evaluation questions file")
-	mode := flag.String("mode", "lesson2", "mode: lesson2, baseline, sentence, automerging, or all")
+	mode := flag.String("mode", "lesson3", "mode: lesson3, lesson2, baseline, sentence, automerging, or all")
 	dashboard := flag.Bool("dashboard", false, "start interactive dashboard on http://localhost:8501")
 	topK := flag.Int("topk", 6, "number of chunks to retrieve per query")
 	flag.Parse()
@@ -114,6 +117,148 @@ func main() {
 	ranker := retriever.NewLLMReranker(judge)
 
 	var evaluators []*eval.Evaluator
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// LESSON 3: SENTENCE WINDOW RETRIEVAL IN-DEPTH (Window Sizing, Reranking & Persistence)
+	// ══════════════════════════════════════════════════════════════════════════
+	if *mode == "lesson3" {
+		fmt.Println("\n=======================================================")
+		fmt.Println("🎓 LESSON 3: SENTENCE WINDOW RETRIEVAL IN-DEPTH")
+		fmt.Println("=======================================================")
+
+		// 1. Concept Exploration: SentenceWindowNodeParser
+		fmt.Println("\n--- 1. Sentence Window Node Parser Demo ---")
+		text1 := "hello. how are you? I am fine!  "
+		nodes1 := loader.BuildSentenceWindows(loader.Document{ID: "demo1", Text: text1}, loader.SentenceWindowOptions{WindowSize: 3})
+		var sents1 []string
+		for _, n := range nodes1 {
+			sents1 = append(sents1, n.Text)
+		}
+		fmt.Printf("Input text 1: %q\n", text1)
+		fmt.Printf("Extracted sentences: %v\n", sents1)
+		if len(nodes1) > 1 {
+			fmt.Printf("nodes[1].metadata[\"window\"] -> %q\n\n", nodes1[1].Metadata["window"])
+		}
+
+		text2 := "hello. foo bar. cat dog. mouse"
+		nodes2 := loader.BuildSentenceWindows(loader.Document{ID: "demo2", Text: text2}, loader.SentenceWindowOptions{WindowSize: 3})
+		var sents2 []string
+		for _, n := range nodes2 {
+			sents2 = append(sents2, n.Text)
+		}
+		fmt.Printf("Input text 2: %q\n", text2)
+		fmt.Printf("Extracted sentences: %v\n", sents2)
+		if len(nodes2) > 0 {
+			fmt.Printf("nodes[0].metadata[\"window\"] -> %q\n", nodes2[0].Metadata["window"])
+		}
+
+		// 2. Metadata Replacement PostProcessor Demo
+		fmt.Println("\n--- 2. Metadata Replacement PostProcessor Demo ---")
+		if len(nodes1) > 1 {
+			fmt.Printf("Node text before postprocessor: %q\n", nodes1[1].Text)
+			fmt.Printf("Node text after MetadataReplacementPostProcessor: %q\n", nodes1[1].Metadata["window"])
+		}
+
+		// 3. Reranker Demonstration (Bi-Encoder vs Cross-Encoder)
+		fmt.Println("\n--- 3. Reranker Demonstration (Why Reranking Matters) ---")
+		toyQuery := "I want a dog."
+		toyCandidates := []retriever.Chunk{
+			{ID: "c1", Text: "This is a cat", Score: 0.6},
+			{ID: "c2", Text: "This is a dog", Score: 0.4},
+		}
+		fmt.Printf("Query: %q\n", toyQuery)
+		fmt.Printf("Bi-encoder similarity scores (misled by topic similarity):\n")
+		fmt.Printf("  • %q -> score: %.2f\n", toyCandidates[0].Text, toyCandidates[0].Score)
+		fmt.Printf("  • %q -> score: %.2f\n", toyCandidates[1].Text, toyCandidates[1].Score)
+
+		fmt.Println("Applying LLM / Cross-Encoder Reranker...")
+		rerankedToy, err := ranker.Rerank(ctx, toyQuery, toyCandidates, 2)
+		if err == nil && len(rerankedToy) > 0 {
+			fmt.Printf("Reranked Output (Cross-attention fixes ranking):\n")
+			for i, c := range rerankedToy {
+				fmt.Printf("  #%d: %q (score: %.2f)\n", i+1, c.Text, c.Score)
+			}
+		}
+
+		// 4. Persistence & Caching: Window Size = 1 vs Window Size = 3
+		fmt.Println("\n--- 4. Building / Loading Sentence Window Indexes (Persistent) ---")
+		engine1, err := pipeline.BuildSentenceWindow(ctx, []loader.Document{document}, pipeline.SentenceWindowConfig{
+			Embedder:        emb,
+			LLM:             lm,
+			Reranker:        ranker,
+			SimilarityTopK:  6,
+			RerankTopN:      2,
+			SaveDir:         "./sentence_index_1",
+			SentenceOptions: loader.SentenceWindowOptions{WindowSize: 1},
+		})
+		if err != nil {
+			log.Fatalf("build engine 1: %v", err)
+		}
+
+		engine3, err := pipeline.BuildSentenceWindow(ctx, []loader.Document{document}, pipeline.SentenceWindowConfig{
+			Embedder:        emb,
+			LLM:             lm,
+			Reranker:        ranker,
+			SimilarityTopK:  6,
+			RerankTopN:      2,
+			SaveDir:         "./sentence_index_3",
+			SentenceOptions: loader.SentenceWindowOptions{WindowSize: 3},
+		})
+		if err != nil {
+			log.Fatalf("build engine 3: %v", err)
+		}
+
+		// 5. Query execution
+		sampleQ := "What are the keys to building a career in AI?"
+		fmt.Printf("\n❓ Query: %s\n", sampleQ)
+		out3, err := engine3.Query(ctx, sampleQ)
+		if err == nil {
+			fmt.Printf("💬 Answer (Window 3 Engine):\n%s\n", strings.TrimSpace(out3.Answer))
+		}
+
+		// 6. Systematic Experimentation & TruLens Leaderboard
+		fmt.Println("\n--- 5. TruLens Evaluation: Window Size 1 vs Window Size 3 ---")
+		evalQuestions := loadLines("generated_questions.text")
+		if len(evalQuestions) == 0 {
+			evalQuestions = []string{"What are the keys to building a career in AI?"}
+		}
+
+		eval1 := eval.NewEvaluator(judge, "sentence window engine 1")
+		eval.RegisterEvaluator(eval1)
+		eval3 := eval.NewEvaluator(judge, "sentence window engine 3")
+		eval.RegisterEvaluator(eval3)
+
+		fmt.Printf("Evaluating %d question(s) with RAG Triad...\n", len(evalQuestions))
+		for _, q := range evalQuestions {
+			r1, _ := engine1.Query(ctx, q)
+			rec1, _ := eval1.Evaluate(ctx, q, r1.Context, r1.Answer)
+
+			r3, _ := engine3.Query(ctx, q)
+			rec3, _ := eval3.Evaluate(ctx, q, r3.Context, r3.Answer)
+
+			fmt.Printf("   [Q: %s]\n", truncate(q, 45))
+			fmt.Printf("     • Engine 1 (Window 1): Ctx: %.2f | Grd: %.2f | Ans: %.2f\n",
+				rec1.ContextRelevance.Score, rec1.Groundedness.Score, rec1.AnswerRelevance.Score)
+			fmt.Printf("     • Engine 3 (Window 3): Ctx: %.2f | Grd: %.2f | Ans: %.2f\n",
+				rec3.ContextRelevance.Score, rec3.Groundedness.Score, rec3.AnswerRelevance.Score)
+		}
+
+		// Leaderboard
+		eval.PrintLeaderboard(eval1, eval3)
+
+		_ = eval1.SaveJSON("eval_results_sentence_win1.json")
+		_ = eval3.SaveJSON("eval_results_sentence_win3.json")
+		fmt.Println("\n💾 Results saved to eval_results_sentence_win1.json & eval_results_sentence_win3.json")
+
+		if *dashboard {
+			if err := eval.StartDashboard("127.0.0.1:8501"); err != nil {
+				log.Fatalf("dashboard: %v", err)
+			}
+		} else {
+			fmt.Println("\n💡 Tip: Run with -dashboard to launch the interactive TruLens UI on http://localhost:8501/")
+		}
+		return
+	}
 
 	// ══════════════════════════════════════════════════════════════════════════
 	// LESSON 2 SPECIFIC MODE (App_1 with Sentence-Window & Full CoT RAG Triad)

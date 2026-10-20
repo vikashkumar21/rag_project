@@ -56,23 +56,37 @@ cp .env.example .env
 OPENAI_API_KEY=sk-...
 ```
 
-### 3. Run Pipelines
+### 3. Run Lessons & Pipelines
 
-Run all three pipelines and output the comparative TruLens leaderboard:
+#### Run Lesson 3: Sentence Window Retrieval In-Depth (Window 1 vs 3, Reranker Demo & Persistence)
+```bash
+go run ./cmd/rag -mode=lesson3
+```
+Add `-dashboard` to launch the interactive web dashboard on `http://localhost:8501/`:
+```bash
+go run ./cmd/rag -mode=lesson3 -dashboard
+```
+
+#### Run Lesson 2: RAG Triad with Chain-of-Thought
+```bash
+go run ./cmd/rag -mode=lesson2 -dashboard
+```
+
+#### Run All Pipelines (Comparative Leaderboard: Baseline vs Sentence-Window vs Auto-Merging)
 ```bash
 go run ./cmd/rag -mode=all
 ```
 
-Run a specific pipeline:
+#### Run a Specific Architecture:
 ```bash
-# Baseline RAG
-go run ./cmd/rag -mode=baseline
-
 # Sentence-Window Retrieval
 go run ./cmd/rag -mode=sentence
 
 # Auto-Merging Retrieval
 go run ./cmd/rag -mode=automerging
+
+# Baseline RAG
+go run ./cmd/rag -mode=baseline
 ```
 
 *(Optional)* Specify a custom PDF or evaluation file:

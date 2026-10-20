@@ -32,10 +32,11 @@ type SentenceWindowConfig struct {
 	Reranker        retriever.Reranker
 	SimilarityTopK  int
 	RerankTopN      int
+	SaveDir         string // Optional directory to persist or load index from disk
 	SentenceOptions loader.SentenceWindowOptions
 }
 
-// BuildSentenceWindow creates and populates a sentence-window pipeline.
+// BuildSentenceWindow creates, indexes, or loads a sentence-window pipeline.
 func BuildSentenceWindow(ctx context.Context, docs []loader.Document, cfg SentenceWindowConfig) (*SentenceWindowRAG, error) {
 	if cfg.SimilarityTopK <= 0 {
 		cfg.SimilarityTopK = 6
@@ -45,6 +46,29 @@ func BuildSentenceWindow(ctx context.Context, docs []loader.Document, cfg Senten
 	}
 	if cfg.SentenceOptions.WindowSize <= 0 {
 		cfg.SentenceOptions = loader.DefaultSentenceWindowOptions()
+	}
+
+	// If SaveDir exists on disk, load the cached vectors directly
+	if cfg.SaveDir != "" && vectorstore.Exists(cfg.SaveDir) {
+		diskStore, err := vectorstore.LoadFromDisk(cfg.SaveDir)
+		if err == nil {
+			fmt.Printf("[sentence-window] loaded %d cached vectors from %s\n", diskStore.Len(), cfg.SaveDir)
+			cfg.Store = diskStore
+			ret := retriever.NewSentenceWindow(retriever.SentenceWindowConfig{
+				Embedder:        cfg.Embedder,
+				Store:           cfg.Store,
+				Reranker:        cfg.Reranker,
+				SimilarityTopK:  cfg.SimilarityTopK,
+				RerankTopN:      cfg.RerankTopN,
+				MetaReplacement: "window",
+			})
+			return &SentenceWindowRAG{ret: ret, lm: cfg.LLM}, nil
+		}
+		fmt.Printf("[sentence-window] warning: failed to load %s (%v), rebuilding index...\n", cfg.SaveDir, err)
+	}
+
+	if cfg.Store == nil {
+		cfg.Store = vectorstore.NewInMemory()
 	}
 
 	// 1. Build sentence windows
@@ -90,6 +114,17 @@ func BuildSentenceWindow(ctx context.Context, docs []loader.Document, cfg Senten
 			return nil, fmt.Errorf("sentence_window/build: store batch: %w", err)
 		}
 		fmt.Printf("[sentence-window] indexed %d / %d sentences\n", end, len(allNodes))
+	}
+
+	// Persist to disk if SaveDir is configured
+	if cfg.SaveDir != "" {
+		if memStore, ok := cfg.Store.(*vectorstore.InMemoryStore); ok {
+			if err := memStore.Save(cfg.SaveDir); err != nil {
+				fmt.Printf("[sentence-window] warning: failed to persist to %s: %v\n", cfg.SaveDir, err)
+			} else {
+				fmt.Printf("[sentence-window] persisted index to %s\n", cfg.SaveDir)
+			}
+		}
 	}
 
 	// 3. Assemble retriever
