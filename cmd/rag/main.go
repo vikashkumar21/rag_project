@@ -2,6 +2,9 @@
 //
 // Usage:
 //
+//	# Run Dynamic Sentence Window Retrieval (zero-reindex, interval merging, lean storage)
+//	go run ./cmd/rag -mode=dynamic
+//
 //	# Run Lesson 3: Sentence Window Retrieval (window 1 vs 3, reranker demo, index persistence)
 //	go run ./cmd/rag -mode=lesson3
 //
@@ -9,14 +12,14 @@
 //	go run ./cmd/rag -mode=lesson2
 //
 //	# Run with interactive dashboard on :8501
-//	go run ./cmd/rag -mode=lesson3 -dashboard
+//	go run ./cmd/rag -mode=dynamic -dashboard
 //
 //	# Run all pipelines (Baseline, Sentence-Window, Auto-Merging)
 //	go run ./cmd/rag -mode=all
 //
 // Flags:
 //
-//	-mode       pipeline/lesson mode: "lesson3", "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson3")
+//	-mode       pipeline/lesson mode: "dynamic", "lesson3", "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson3")
 //	-dashboard  launch TruLens-style interactive web dashboard at http://localhost:8501 (default: false)
 //	-pdf        path to source PDF (default: eBook-How-to-Build-a-Career-in-AI.pdf)
 //	-eval       path to eval questions file (default: eval_questions.txt)
@@ -30,6 +33,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -76,7 +80,7 @@ func main() {
 	// ── Flags ──────────────────────────────────────────────────────────────────
 	pdfPath := flag.String("pdf", "eBook-How-to-Build-a-Career-in-AI.pdf", "path to source PDF")
 	evalFile := flag.String("eval", "eval_questions.txt", "path to evaluation questions file")
-	mode := flag.String("mode", "lesson3", "mode: lesson3, lesson2, baseline, sentence, automerging, or all")
+	mode := flag.String("mode", "dynamic", "mode: dynamic, lesson3, lesson2, baseline, sentence, automerging, or all")
 	dashboard := flag.Bool("dashboard", false, "start interactive dashboard on http://localhost:8501")
 	topK := flag.Int("topk", 6, "number of chunks to retrieve per query")
 	flag.Parse()
@@ -117,6 +121,114 @@ func main() {
 	ranker := retriever.NewLLMReranker(judge)
 
 	var evaluators []*eval.Evaluator
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// DYNAMIC SENTENCE-WINDOW RETRIEVAL (Zero-reindex, interval merging, lean storage)
+	// ══════════════════════════════════════════════════════════════════════════
+	if *mode == "dynamic" {
+		fmt.Println("\n=======================================================")
+		fmt.Println("⚡ DYNAMIC SENTENCE-WINDOW RETRIEVAL")
+		fmt.Println("   • Single index build (sentences stored once)")
+		fmt.Println("   • Zero-reindex runtime window tuning (K=1, K=3, K=5)")
+		fmt.Println("   • Automatic overlapping interval merging")
+		fmt.Println("=======================================================")
+
+		// 1. Build or Load Dynamic Index
+		dynamicEngine, err := pipeline.BuildDynamicSentence(ctx, []loader.Document{document}, pipeline.DynamicSentenceConfig{
+			Embedder:          emb,
+			LLM:               lm,
+			Reranker:          ranker,
+			SimilarityTopK:    6,
+			RerankTopN:        2,
+			DefaultWindowSize: 3,
+			SaveDir:           "./sentence_index_dynamic",
+		})
+		if err != nil {
+			log.Fatalf("build dynamic engine: %v", err)
+		}
+
+		// 2. Demonstrate Dynamic Window Sizing on the SAME index
+		query := "What are the keys to building a career in AI?"
+		fmt.Printf("\n❓ Test Query: %s\n", query)
+
+		for _, winSize := range []int{1, 3, 5} {
+			fmt.Printf("\n--- Querying with Dynamic Window Size = %d (on the same index) ---\n", winSize)
+			res, qErr := dynamicEngine.Query(ctx, query, winSize)
+			if qErr != nil {
+				log.Printf("query error with window %d: %v", winSize, qErr)
+				continue
+			}
+			fmt.Printf("Context preview (length %d runes):\n", len([]rune(res.Context)))
+			previewLines := strings.Split(res.Context, "\n")
+			for i := 0; i < len(previewLines) && i < 6; i++ {
+				if strings.TrimSpace(previewLines[i]) != "" {
+					fmt.Printf("  %s\n", truncate(previewLines[i], 90))
+				}
+			}
+			fmt.Printf("Answer (Window %d):\n%s\n", winSize, truncate(strings.TrimSpace(res.Answer), 150))
+		}
+
+		// 3. Storage Efficiency Comparison (Static vs Dynamic)
+		fmt.Println("\n--- Storage Footprint Comparison ---")
+		checkDirSize := func(dir string) int64 {
+			var total int64
+			_ = filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() {
+					total += info.Size()
+				}
+				return nil
+			})
+			return total
+		}
+		staticSize := checkDirSize("./sentence_index_3")
+		dynamicSize := checkDirSize("./sentence_index_dynamic")
+		if staticSize > 0 && dynamicSize > 0 {
+			fmt.Printf("  • Static Window Index (./sentence_index_3)        : %d bytes\n", staticSize)
+			fmt.Printf("  • Dynamic Index & Corpus (./sentence_index_dynamic): %d bytes\n", dynamicSize)
+			if staticSize > dynamicSize {
+				savings := (1.0 - float64(dynamicSize)/float64(staticSize)) * 100
+				fmt.Printf("  • Storage Reduction: ~%.1f%% 🚀\n", savings)
+			}
+		} else {
+			fmt.Printf("  • Dynamic Index & Corpus (./sentence_index_dynamic): %d bytes\n", dynamicSize)
+			fmt.Println("  (Tip: Run -mode=lesson3 to build static index for side-by-side byte comparison)")
+		}
+
+		// 4. Comparative TruLens Evaluation across Dynamic Window Sizes
+		fmt.Println("\n--- TruLens Evaluation across Dynamic Window Sizes ---")
+		evalQuestions := loadLines("generated_questions.text")
+		if len(evalQuestions) == 0 {
+			evalQuestions = []string{
+				"What are the keys to building a career in AI?",
+				"How do I transition into an AI career from a software engineering background?",
+			}
+		}
+
+		evalWin1 := eval.NewEvaluator(judge, "Dynamic Window (K=1)")
+		eval.RegisterEvaluator(evalWin1)
+		evalWin3 := eval.NewEvaluator(judge, "Dynamic Window (K=3)")
+		eval.RegisterEvaluator(evalWin3)
+
+		fmt.Printf("Evaluating %d question(s) with Window=1 vs Window=3 on the same index...\n", len(evalQuestions))
+		for _, q := range evalQuestions {
+			res1, _ := dynamicEngine.Query(ctx, q, 1)
+			_, _ = evalWin1.Evaluate(ctx, q, res1.Context, res1.Answer)
+
+			res3, _ := dynamicEngine.Query(ctx, q, 3)
+			_, _ = evalWin3.Evaluate(ctx, q, res3.Context, res3.Answer)
+		}
+
+		eval.PrintLeaderboard(evalWin1, evalWin3)
+
+		if *dashboard {
+			if err := eval.StartDashboard("127.0.0.1:8501"); err != nil {
+				log.Fatalf("dashboard: %v", err)
+			}
+		} else {
+			fmt.Println("\n💡 Tip: Run with -dashboard to launch the interactive TruLens UI on http://localhost:8501/")
+		}
+		return
+	}
 
 	// ══════════════════════════════════════════════════════════════════════════
 	// LESSON 3: SENTENCE WINDOW RETRIEVAL IN-DEPTH (Window Sizing, Reranking & Persistence)

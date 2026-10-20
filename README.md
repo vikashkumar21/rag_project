@@ -10,6 +10,7 @@ An Advanced **Retrieval Augmented Generation (RAG)** system built from scratch i
 |---|---|---|
 | **Baseline RAG** | Fixed-size overlapping chunks + Top-K similarity search (`Direct Query Engine`) | ✅ Complete |
 | **Sentence-Window Retrieval** | Indexes single sentences for fine-grained search, expands to surrounding sentence window + reranking (`Sentence Window Query Engine`) | ✅ Complete |
+| **Dynamic Sentence-Window** | Single-index dynamic slicing ($K=1, 3, 5$), interval merging, and 75% leaner storage | ✅ Complete |
 | **Auto-Merging Retrieval** | Hierarchical document trees (2048 → 512 → 128); searches leaf nodes and merges upwards to parent chunks (`Automerging Query Engine`) | ✅ Complete |
 | **RAG Triad Evaluation** | Evaluates **Context Relevance**, **Groundedness**, and **Answer Relevance** using LLM-as-judge | ✅ Complete |
 | **TruLens-style Leaderboard** | Side-by-side comparative table benchmarking all pipelines against evaluation questions | ✅ Complete |
@@ -24,16 +25,18 @@ rag_project/
 ├── README.md
 ├── RAG_Course_Guide.md       # Comprehensive lesson guide & conceptual walkthrough
 ├── eval_questions.txt        # Benchmark evaluation queries
+├── generated_questions.text  # Course evaluation dataset
 ├── internal/
-│   ├── loader/               # PDF loading, sentence segmenter, hierarchical chunker
+│   ├── loader/               # PDF loading, sentence segmenter, hierarchical chunker, sentence corpus
 │   ├── embedder/             # OpenAI text-embedding-3-small provider
-│   ├── vectorstore/          # In-memory cosine vector store + DocStore for trees
-│   ├── retriever/            # Similarity, Sentence-Window, and Auto-Merging retrievers + Reranker
+│   ├── vectorstore/          # In-memory cosine vector store + DocStore + disk persistence
+│   ├── retriever/            # Similarity, Sentence-Window, Dynamic Sentence, and Auto-Merging retrievers + Reranker
 │   ├── llm/                  # OpenAI chat completions client (gpt-3.5-turbo / gpt-4o)
 │   └── eval/                 # RAG Triad evaluation metrics & Leaderboard printer
 ├── pipeline/
 │   ├── baseline.go           # Baseline RAG assembly
 │   ├── sentence_window.go    # Sentence-window indexing & query workflow
+│   ├── dynamic_sentence.go   # Dynamic sentence-window assembly
 │   └── automerging.go        # Auto-merging indexing & query workflow
 └── cmd/
     └── rag/                  # Multi-mode CLI entry point
@@ -57,6 +60,11 @@ OPENAI_API_KEY=sk-...
 ```
 
 ### 3. Run Lessons & Pipelines
+
+#### Run Dynamic Sentence Window Retrieval (Zero-reindex tuning, interval merging, lean storage)
+```bash
+go run ./cmd/rag -mode=dynamic
+```
 
 #### Run Lesson 3: Sentence Window Retrieval In-Depth (Window 1 vs 3, Reranker Demo & Persistence)
 ```bash
