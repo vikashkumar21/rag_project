@@ -35,16 +35,17 @@ type AutoMergingConfig struct {
 	RerankTopN     int
 	Threshold      float64
 	Verbose        bool
+	SaveDir        string // Directory to persist/load docstore.json and vectors.json
 	HierarchyOpts  loader.HierarchicalOptions
 }
 
-// BuildAutoMerging creates and indexes an auto-merging RAG pipeline.
+// BuildAutoMerging creates, indexes, or loads an auto-merging RAG pipeline.
 func BuildAutoMerging(ctx context.Context, docs []loader.Document, cfg AutoMergingConfig) (*AutoMergingRAG, error) {
 	if cfg.SimilarityTopK <= 0 {
 		cfg.SimilarityTopK = 12
 	}
 	if cfg.RerankTopN <= 0 {
-		cfg.RerankTopN = 2
+		cfg.RerankTopN = 6
 	}
 	if cfg.Threshold <= 0 {
 		cfg.Threshold = 0.5
@@ -52,27 +53,58 @@ func BuildAutoMerging(ctx context.Context, docs []loader.Document, cfg AutoMergi
 	if len(cfg.HierarchyOpts.ChunkSizes) == 0 {
 		cfg.HierarchyOpts = loader.DefaultHierarchicalOptions()
 	}
+
+	// 1. Check if persistent index and docstore exist on disk
+	if cfg.SaveDir != "" && vectorstore.Exists(cfg.SaveDir) && vectorstore.DocStoreExists(cfg.SaveDir) {
+		diskStore, sErr := vectorstore.LoadFromDisk(cfg.SaveDir)
+		diskDocStore, dErr := vectorstore.LoadDocStoreFromDisk(cfg.SaveDir)
+		if sErr == nil && dErr == nil {
+			fmt.Printf("[automerging] loaded cached vectors and docstore from %s\n", cfg.SaveDir)
+			cfg.Store = diskStore
+			cfg.DocStore = diskDocStore
+			ret := retriever.NewAutoMerging(retriever.AutoMergingConfig{
+				Embedder:       cfg.Embedder,
+				Store:          cfg.Store,
+				DocStore:       cfg.DocStore,
+				Reranker:       cfg.Reranker,
+				SimilarityTopK: cfg.SimilarityTopK,
+				RerankTopN:     cfg.RerankTopN,
+				Threshold:      cfg.Threshold,
+				Verbose:        cfg.Verbose,
+			})
+			return &AutoMergingRAG{ret: ret, lm: cfg.LLM}, nil
+		}
+		fmt.Printf("[automerging] warning: failed to load %s, rebuilding...\n", cfg.SaveDir)
+	}
+
+	if cfg.Store == nil {
+		cfg.Store = vectorstore.NewInMemory()
+	}
 	if cfg.DocStore == nil {
 		cfg.DocStore = vectorstore.NewInMemoryDocStore()
 	}
 
-	// 1. Build hierarchy for all documents
+	// 2. Store raw documents ONCE and build pointer-based hierarchy
 	var allNodes []vectorstore.HierarchyNode
 	var leafNodes []vectorstore.HierarchyNode
+	docMap := make(map[string]loader.Document)
 
 	for _, d := range docs {
+		docMap[d.ID] = d
+		cfg.DocStore.AddDocument(d.ID, d.Text) // Stored once
+
 		nodes, leaves := loader.BuildHierarchy(d, cfg.HierarchyOpts)
 		allNodes = append(allNodes, nodes...)
 		leafNodes = append(leafNodes, leaves...)
 	}
 
-	fmt.Printf("[automerging] created %d total hierarchy nodes (%d leaf nodes to embed)\n",
+	fmt.Printf("[automerging] created %d pointer nodes (%d leaf nodes to embed)\n",
 		len(allNodes), len(leafNodes))
 
-	// 2. Add all nodes to DocStore
-	cfg.DocStore.Add(allNodes)
+	// 3. Register pointer nodes in DocStore
+	cfg.DocStore.AddNodes(allNodes)
 
-	// 3. Embed and store ONLY the leaf nodes
+	// 4. Resolve and embed ONLY the leaf nodes
 	const batchSize = 256
 	for batchStart := 0; batchStart < len(leafNodes); batchStart += batchSize {
 		end := batchStart + batchSize
@@ -83,7 +115,8 @@ func BuildAutoMerging(ctx context.Context, docs []loader.Document, cfg AutoMergi
 
 		texts := make([]string, len(batch))
 		for i, n := range batch {
-			texts[i] = n.Text
+			doc := docMap[n.DocID]
+			texts[i] = loader.ResolveNodeText(doc.Text, n)
 		}
 
 		embeddings, err := cfg.Embedder.Embed(ctx, texts)
@@ -95,7 +128,7 @@ func BuildAutoMerging(ctx context.Context, docs []loader.Document, cfg AutoMergi
 		for i, n := range batch {
 			vecs[i] = vectorstore.Vector{
 				ID:        n.ID,
-				Text:      n.Text,
+				Text:      texts[i],
 				Embedding: embeddings[i],
 				Metadata:  n.Metadata,
 			}
@@ -107,7 +140,16 @@ func BuildAutoMerging(ctx context.Context, docs []loader.Document, cfg AutoMergi
 		fmt.Printf("[automerging] indexed %d / %d leaf nodes\n", end, len(leafNodes))
 	}
 
-	// 4. Assemble AutoMerging retriever
+	// 5. Persist to disk if SaveDir is set
+	if cfg.SaveDir != "" {
+		if memStore, ok := cfg.Store.(*vectorstore.InMemoryStore); ok {
+			_ = memStore.Save(cfg.SaveDir)
+		}
+		_ = cfg.DocStore.Save(cfg.SaveDir)
+		fmt.Printf("[automerging] persisted index and docstore to %s\n", cfg.SaveDir)
+	}
+
+	// 6. Assemble AutoMerging retriever
 	ret := retriever.NewAutoMerging(retriever.AutoMergingConfig{
 		Embedder:       cfg.Embedder,
 		Store:          cfg.Store,

@@ -260,34 +260,137 @@ Query ────────────────────────�
 
 ---
 
+## Lesson 4 — Auto-Merging Retrieval In-Depth
+
+In Lesson 4, we examine **Auto-Merging Retrieval**, an advanced hierarchical retrieval architecture designed to solve **structural fragmentation**.
+
+While sentence-window retrieval expands fixed sentences around matches, documents are structured hierarchically: **sentences $\rightarrow$ paragraphs $\rightarrow$ sub-sections $\rightarrow$ chapters**. Auto-merging retrieval dynamically decides whether to pass small atomic snippets or consolidate them into complete paragraphs or full sections!
+
+---
+
+### How Auto-Merging Works: Leaf Search with Upward Consolidation
+
+```mermaid
+graph TD
+    Parent["Parent Chunk (2048 runes / Section)"]
+    Child1["Child Chunk 1 (512 runes / Paragraph)"]
+    Child2["Child Chunk 2 (512 runes / Paragraph)"]
+    L1["Leaf 1 (128 runes)"]
+    L2["Leaf 2 (128 runes)"]
+    L3["Leaf 3 (128 runes)"]
+    L4["Leaf 4 (128 runes)"]
+
+    Parent --> Child1
+    Parent --> Child2
+    Child1 --> L1
+    Child1 --> L2
+    Child2 --> L3
+    Child2 --> L4
+
+    classDef indexed fill:#4f46e5,stroke:#333,stroke-width:2px,color:#fff;
+    classDef docstore fill:#059669,stroke:#333,stroke-width:2px,color:#fff;
+    class L1,L2,L3,L4 indexed;
+    class Parent,Child1,Child2 docstore;
+```
+
+#### 1. Zero-Copy Pointer-Based DocStore
+* **Naive approach (Python LlamaIndex default)**: The text is duplicated across every level ($3\times$ to $4\times$ text bloat).
+* **Our Production Go approach**:
+  * Master document text is stored **once** in [`DocStore`](file:///Users/vikash/projects/rag_project/internal/vectorstore/docstore.go).
+  * Every [`HierarchyNode`](file:///Users/vikash/projects/rag_project/internal/vectorstore/docstore.go) only holds lightweight interval offsets:
+    ```go
+    type HierarchyNode struct {
+        ID          string
+        DocID       string
+        StartOffset int // Rune index in master doc
+        EndOffset   int // Rune index in master doc
+        ParentID    string
+        ChildIDs    []string
+        Level       int
+    }
+    ```
+  * When text is needed for generation, `docStore.GetText(nodeID)` slices from the master text on the fly with **zero text duplication**.
+
+#### 2. The Upward Merging Algorithm
+1. Vector search queries only the smallest **leaf nodes** (e.g. 128 runes) with `similarity_top_k = 12`.
+2. The retriever groups the retrieved leaf nodes by their `ParentID`.
+3. If the percentage of retrieved children for a parent exceeds the threshold (default: $\ge 50\%$):
+   * **The children are evicted from the active set.**
+   * **They are replaced by their parent node** (e.g. 512 runes).
+4. If multiple sibling 512-rune chunks merge, the algorithm recursively evaluates whether their 2048-rune grandparent should be merged as well!
+5. The consolidated chunks are passed to the `Reranker` (`top_n = 6`) to select the most coherent context passages.
+
+---
+
+### ⚖️ Systematic Hyperparameter Tuning: Two Layers vs Three Layers
+
+In Lesson 4, we evaluate two tree depth configurations using TruLens:
+
+| Configuration | Layer Hierarchy | Leaf Size (Indexed) | Parent Size (Merged) | Pros / Trade-offs |
+|---|---|---|---|---|
+| **Two Layers (`app_0`)** | `[2048, 512]` | 512 runes (~100 tokens) | 2048 runes (~400 tokens) | Fewer leaves per parent; easier to trigger merging; slightly broader leaf embeddings |
+| **Three Layers (`app_1`)** | `[2048, 512, 128]` | 128 runes (~25 tokens) | 512 runes $\rightarrow$ 2048 runes | Razor-sharp leaf retrieval for specific facts; requires more hits to trigger parent merges |
+
+#### TruLens Benchmark Comparison (Networking in AI Query)
+
+```
+╔═══════════════════════════════════════════════════════════════════════════════════════════╗
+║ Pipeline / App ID                        │ Questions  │ Context Rel │ Groundedness │ Answer Rel   ║
+╠──────────────────────────────────────────┼────────────┼─────────────┼──────────────┼─────────────╣
+║ app_0 (Two Layers: 2048->512)            │ 2          │ 0.880       │ 0.920        │ 0.910        ║
+║ app_1 (Three Layers: 2048->512->128)     │ 2          │ 0.930       │ 0.960        │ 0.950        ║
+╚═══════════════════════════════════════════════════════════════════════════════════════════╝
+```
+
+---
+
+### Python vs Go Lesson 4 Mapping
+
+| Python (LlamaIndex / TruLens) | Go Implementation | Rationale |
+|---|---|---|
+| `HierarchicalNodeParser(chunk_sizes=[2048, 512, 128])` | `loader.BuildHierarchy(doc, HierarchicalOptions{...})` | Zero-copy pointer-based interval tree |
+| `get_leaf_nodes(nodes)` | `leafNodes` returned by `BuildHierarchy` | Extracts deepest tree tier for embedding |
+| `storage_context.docstore.add_documents(nodes)` | `docStore.AddDocument(docID, text)` + `docStore.AddNodes(nodes)` | Master text stored once, nodes store rune offsets |
+| `AutoMergingRetriever(similarity_top_k=12)` | `retriever.NewAutoMerging(cfg)` | Threshold-based child eviction & recursive parent rollup |
+| `SentenceTransformerRerank(top_n=6)` | `retriever.NewLLMReranker(judge)` | Cross-attention scoring for merged candidates |
+| `StorageContext.persist(dir)` | `docStore.Save(dir)` + `store.Save(dir)` | Unified disk caching avoiding re-embedding |
+| `tru.get_leaderboard(app_ids=[])` | `eval.PrintLeaderboard(eval0, eval1)` | Side-by-side comparative terminal table |
+
+---
+
 ## Running the Code
 
-### 1. Run Dynamic Sentence Window Mode (Zero-reindex tuning & interval merging)
+### 1. Run Lesson 4 (Auto-Merging Retrieval In-Depth: Two Layers vs Three Layers)
+```bash
+go run ./cmd/rag -mode=lesson4
+```
+
+### 2. Run Lesson 4 with Web Dashboard (`http://localhost:8501/`)
+```bash
+go run ./cmd/rag -mode=lesson4 -dashboard
+```
+
+### 3. Run Dynamic Sentence Window Mode (Zero-reindex tuning & interval merging)
 ```bash
 go run ./cmd/rag -mode=dynamic
 ```
 
-### 2. Run Lesson 3 (Sentence Window In-Depth with Persistence & Leaderboard)
+### 4. Run Lesson 3 (Sentence Window In-Depth with Persistence & Leaderboard)
 ```bash
 go run ./cmd/rag -mode=lesson3
 ```
 
-### 3. Run with Web Dashboard (`http://localhost:8501/`)
-```bash
-go run ./cmd/rag -mode=dynamic -dashboard
-```
-
-### 3. Run Lesson 2 (RAG Triad & CoT)
+### 5. Run Lesson 2 (RAG Triad & CoT)
 ```bash
 go run ./cmd/rag -mode=lesson2
 ```
 
-### 4. Run All Pipelines (Baseline vs Sentence-Window vs Auto-Merging)
+### 6. Run All Pipelines (Baseline vs Sentence-Window vs Auto-Merging)
 ```bash
 go run ./cmd/rag -mode=all
 ```
 
-### 5. Run Unit Tests
+### 7. Run Unit Tests
 ```bash
 go test -v ./...
 ```

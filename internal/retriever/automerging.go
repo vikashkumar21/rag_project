@@ -150,14 +150,10 @@ func (r *AutoMergingRetriever) Retrieve(ctx context.Context, query string, topK 
 		}
 	}
 
-	// 5. Build candidate chunks from docStore
+	// 5. Build candidate chunks dynamically resolving text from docStore
 	candidates := make([]Chunk, 0, len(currentNodes))
 	for id, act := range currentNodes {
-		node, ok := r.docStore.Get(id)
-		text := ""
-		if ok {
-			text = node.Text
-		}
+		text, _ := r.docStore.GetText(id)
 		candidates = append(candidates, Chunk{
 			ID:    id,
 			Text:  text,

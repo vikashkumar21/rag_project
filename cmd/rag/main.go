@@ -2,6 +2,9 @@
 //
 // Usage:
 //
+//	# Run Lesson 4: Auto-Merging Retrieval (Pointer-Based Hierarchy, 2-layer vs 3-layer, leaf-to-parent rollup)
+//	go run ./cmd/rag -mode=lesson4
+//
 //	# Run Dynamic Sentence Window Retrieval (zero-reindex, interval merging, lean storage)
 //	go run ./cmd/rag -mode=dynamic
 //
@@ -12,14 +15,14 @@
 //	go run ./cmd/rag -mode=lesson2
 //
 //	# Run with interactive dashboard on :8501
-//	go run ./cmd/rag -mode=dynamic -dashboard
+//	go run ./cmd/rag -mode=lesson4 -dashboard
 //
 //	# Run all pipelines (Baseline, Sentence-Window, Auto-Merging)
 //	go run ./cmd/rag -mode=all
 //
 // Flags:
 //
-//	-mode       pipeline/lesson mode: "dynamic", "lesson3", "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson3")
+//	-mode       pipeline/lesson mode: "lesson4", "dynamic", "lesson3", "lesson2", "baseline", "sentence", "automerging", or "all" (default: "lesson4")
 //	-dashboard  launch TruLens-style interactive web dashboard at http://localhost:8501 (default: false)
 //	-pdf        path to source PDF (default: eBook-How-to-Build-a-Career-in-AI.pdf)
 //	-eval       path to eval questions file (default: eval_questions.txt)
@@ -80,7 +83,7 @@ func main() {
 	// ── Flags ──────────────────────────────────────────────────────────────────
 	pdfPath := flag.String("pdf", "eBook-How-to-Build-a-Career-in-AI.pdf", "path to source PDF")
 	evalFile := flag.String("eval", "eval_questions.txt", "path to evaluation questions file")
-	mode := flag.String("mode", "dynamic", "mode: dynamic, lesson3, lesson2, baseline, sentence, automerging, or all")
+	mode := flag.String("mode", "lesson4", "mode: lesson4, dynamic, lesson3, lesson2, baseline, sentence, automerging, or all")
 	dashboard := flag.Bool("dashboard", false, "start interactive dashboard on http://localhost:8501")
 	topK := flag.Int("topk", 6, "number of chunks to retrieve per query")
 	flag.Parse()
@@ -121,6 +124,137 @@ func main() {
 	ranker := retriever.NewLLMReranker(judge)
 
 	var evaluators []*eval.Evaluator
+
+	// ══════════════════════════════════════════════════════════════════════════
+	// LESSON 4: AUTO-MERGING RETRIEVAL (Pointer-Based Hierarchy, 2-layer vs 3-layer)
+	// ══════════════════════════════════════════════════════════════════════════
+	if *mode == "lesson4" {
+		fmt.Println("\n=======================================================")
+		fmt.Println("🌳 LESSON 4: AUTO-MERGING RETRIEVAL IN-DEPTH")
+		fmt.Println("   • Zero-copy pointer-based DocStore hierarchy")
+		fmt.Println("   • Small leaf embeddings for precision")
+		fmt.Println("   • Dynamic child-to-parent consolidation (Threshold >= 50%)")
+		fmt.Println("   • Benchmark: Two-Layer (app_0) vs Three-Layer (app_1)")
+		fmt.Println("=======================================================")
+
+		// 1. Concept Exploration: Leaf vs Parent Node Inspection (Pointer-Based)
+		fmt.Println("\n--- 1. Pointer-Based Hierarchy Inspection ---")
+		allNodes, leafNodes := loader.BuildHierarchy(document, loader.HierarchicalOptions{
+			ChunkSizes: []int{2048, 512, 128},
+		})
+		fmt.Printf("Document size: %d runes\n", len([]rune(document.Text)))
+		fmt.Printf("Total pointer nodes: %d (Level 0: 2048, Level 1: 512, Level 2: 128)\n", len(allNodes))
+		fmt.Printf("Total leaf nodes to embed: %d\n", len(leafNodes))
+
+		if len(leafNodes) > 0 {
+			targetLeafIdx := 30
+			if targetLeafIdx >= len(leafNodes) {
+				targetLeafIdx = len(leafNodes) / 2
+			}
+			leaf := leafNodes[targetLeafIdx]
+			leafText := loader.ResolveNodeText(document.Text, leaf)
+
+			var parent vectorstore.HierarchyNode
+			for _, n := range allNodes {
+				if n.ID == leaf.ParentID {
+					parent = n
+					break
+				}
+			}
+			parentText := loader.ResolveNodeText(document.Text, parent)
+
+			fmt.Printf("\nInspecting Leaf Node [%s] (Offset [%d:%d], %d runes):\n%s\n",
+				leaf.ID, leaf.StartOffset, leaf.EndOffset, len([]rune(leafText)), truncate(leafText, 120))
+			fmt.Printf("\nParent Node [%s] (Offset [%d:%d], %d runes):\n%s\n",
+				parent.ID, parent.StartOffset, parent.EndOffset, len([]rune(parentText)), truncate(parentText, 200))
+			fmt.Println("\n💡 Notice: Both leaf and parent were sliced from master text with 0 text duplication in memory!")
+		}
+
+		// 2. Build or Load Two-Layer Hierarchy (app_0: [2048, 512])
+		fmt.Println("\n--- 2. Building / Loading Two-Layer AutoMerging Index (app_0: 2048 -> 512) ---")
+		engine0, err := pipeline.BuildAutoMerging(ctx, []loader.Document{document}, pipeline.AutoMergingConfig{
+			Embedder:       emb,
+			LLM:            lm,
+			Reranker:       ranker,
+			SimilarityTopK: 12,
+			RerankTopN:     6,
+			Threshold:      0.5,
+			SaveDir:        "./merging_index_0",
+			HierarchyOpts:  loader.HierarchicalOptions{ChunkSizes: []int{2048, 512}},
+		})
+		if err != nil {
+			log.Fatalf("build engine 0: %v", err)
+		}
+
+		// 3. Build or Load Three-Layer Hierarchy (app_1: [2048, 512, 128])
+		fmt.Println("\n--- 3. Building / Loading Three-Layer AutoMerging Index (app_1: 2048 -> 512 -> 128) ---")
+		engine1, err := pipeline.BuildAutoMerging(ctx, []loader.Document{document}, pipeline.AutoMergingConfig{
+			Embedder:       emb,
+			LLM:            lm,
+			Reranker:       ranker,
+			SimilarityTopK: 12,
+			RerankTopN:     6,
+			Threshold:      0.5,
+			SaveDir:        "./merging_index_1",
+			HierarchyOpts:  loader.HierarchicalOptions{ChunkSizes: []int{2048, 512, 128}},
+		})
+		if err != nil {
+			log.Fatalf("build engine 1: %v", err)
+		}
+
+		// 4. Test Query from Lesson 4
+		testQ := "What is the importance of networking in AI?"
+		fmt.Printf("\n❓ Query: %s\n", testQ)
+		res1, err := engine1.Query(ctx, testQ)
+		if err == nil {
+			fmt.Printf("💬 Answer (Three-Layer Engine 1):\n%s\n", strings.TrimSpace(res1.Answer))
+		}
+
+		// 5. TruLens Systematic Evaluation: app_0 vs app_1
+		fmt.Println("\n--- 4. TruLens Evaluation: app_0 (Two Layers) vs app_1 (Three Layers) ---")
+		evalQuestions := loadLines("generated_questions.text")
+		if len(evalQuestions) == 0 {
+			evalQuestions = []string{testQ}
+		} else {
+			evalQuestions = append(evalQuestions, testQ)
+		}
+
+		eval0 := eval.NewEvaluator(judge, "app_0 (Two Layers: 2048->512)")
+		eval.RegisterEvaluator(eval0)
+		eval1 := eval.NewEvaluator(judge, "app_1 (Three Layers: 2048->512->128)")
+		eval.RegisterEvaluator(eval1)
+
+		fmt.Printf("Evaluating %d question(s) with RAG Triad across both architectures...\n", len(evalQuestions))
+		for _, q := range evalQuestions {
+			r0, _ := engine0.Query(ctx, q)
+			rec0, _ := eval0.Evaluate(ctx, q, r0.Context, r0.Answer)
+
+			r1, _ := engine1.Query(ctx, q)
+			rec1, _ := eval1.Evaluate(ctx, q, r1.Context, r1.Answer)
+
+			fmt.Printf("   [Q: %s]\n", truncate(q, 45))
+			fmt.Printf("     • app_0 (Two-Layer)  : Ctx: %.2f | Grd: %.2f | Ans: %.2f\n",
+				rec0.ContextRelevance.Score, rec0.Groundedness.Score, rec0.AnswerRelevance.Score)
+			fmt.Printf("     • app_1 (Three-Layer): Ctx: %.2f | Grd: %.2f | Ans: %.2f\n",
+				rec1.ContextRelevance.Score, rec1.Groundedness.Score, rec1.AnswerRelevance.Score)
+		}
+
+		// Leaderboard
+		eval.PrintLeaderboard(eval0, eval1)
+
+		_ = eval0.SaveJSON("eval_results_automerging_app0.json")
+		_ = eval1.SaveJSON("eval_results_automerging_app1.json")
+		fmt.Println("\n💾 Results saved to eval_results_automerging_app0.json & eval_results_automerging_app1.json")
+
+		if *dashboard {
+			if err := eval.StartDashboard("127.0.0.1:8501"); err != nil {
+				log.Fatalf("dashboard: %v", err)
+			}
+		} else {
+			fmt.Println("\n💡 Tip: Run with -dashboard to launch the interactive TruLens UI on http://localhost:8501/")
+		}
+		return
+	}
 
 	// ══════════════════════════════════════════════════════════════════════════
 	// DYNAMIC SENTENCE-WINDOW RETRIEVAL (Zero-reindex, interval merging, lean storage)

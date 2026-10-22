@@ -61,6 +61,15 @@ OPENAI_API_KEY=sk-...
 
 ### 3. Run Lessons & Pipelines
 
+#### Run Lesson 4: Auto-Merging Retrieval (Two-Layer vs Three-Layer, Pointer-Based Zero-Copy DocStore)
+```bash
+go run ./cmd/rag -mode=lesson4
+```
+Add `-dashboard` to launch the interactive evaluation leaderboard:
+```bash
+go run ./cmd/rag -mode=lesson4 -dashboard
+```
+
 #### Run Dynamic Sentence Window Retrieval (Zero-reindex tuning, interval merging, lean storage)
 ```bash
 go run ./cmd/rag -mode=dynamic
